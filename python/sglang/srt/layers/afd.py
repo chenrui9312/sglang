@@ -650,6 +650,10 @@ class AFDCommunicator(LayerCommunicator):
         self.perspective = perspective
         self.layer_communicator = layer_communicator
         self.layer_id = layer_id
+        # init attr from layer_communicator
+        for attr in dir(layer_communicator):
+            if not attr.startswith("__") and not attr in dir(self):
+                setattr(self, attr, getattr(layer_communicator, attr))
 
     def prepare_attn(
         self,
@@ -703,10 +707,18 @@ class AFDProxyAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        forward_batch: ForwardBatch) -> torch.Tensor:
+        forward_batch: ForwardBatch,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
         return hidden_states
 
 class AFDProxyMLP(nn.Module):
-    def forward(self, hidden_states: torch.Tensor,
-                forward_batch: Optional[ForwardBatch] = None, *args, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: Optional[ForwardBatch] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
         return hidden_states

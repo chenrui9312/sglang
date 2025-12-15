@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union
 
 import torch
 
+from sglang.srt.layers.afd import afd_is_ffn
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.hf_transformers_utils import (
@@ -254,7 +255,7 @@ class TpModelWorker:
             if launch_done is not None:
                 launch_done.set()
 
-            if skip_sample:
+            if skip_sample or afd_is_ffn():
                 next_token_ids = None
             else:
                 next_token_ids = self.model_runner.sample(

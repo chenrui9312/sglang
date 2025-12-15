@@ -108,6 +108,8 @@ GLOBAL_SERVER_ARGS_KEYS = [
     "quantization",
     "enable_custom_logit_processor",
     "disaggregation_mode",
+    "afd_perspective",
+    "afd_mirco_batch",
 ]
 
 # Put some global args for easy access

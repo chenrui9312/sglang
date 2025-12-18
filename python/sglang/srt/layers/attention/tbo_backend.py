@@ -5,6 +5,8 @@ import torch
 from sglang.srt import two_batch_overlap
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
+from sglang.srt.layers.afd import afd_is_ffn, get_afd_mirco_batch, get_afd_perspective                                  
+from sglang.srt.layers.afd_type import AFDPerspective
 
 if TYPE_CHECKING:
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -199,13 +201,14 @@ class AfdAttnBackend(AttentionBackend):
         )
 
     def init_forward_metadata(self, forward_batch: "ForwardBatch"):
-        self.primary.init_forward_metadata(forward_batch=forward_batch)
-        if forward_batch.afd_children is not None:
-            for child, forward_batch_child in zip(
-                self.children, forward_batch.afd_children, strict=True
-            ):
-                if forward_batch_child.batch_size > 0:
-                    child.init_forward_metadata(forward_batch=forward_batch_child)
+        if not afd_is_ffn():
+            self.primary.init_forward_metadata(forward_batch=forward_batch)
+            if forward_batch.afd_children is not None:
+                for child, forward_batch_child in zip(
+                    self.children, forward_batch.afd_children, strict=True
+                ):
+                    if forward_batch_child.batch_size > 0:
+                        child.init_forward_metadata(forward_batch=forward_batch_child)
 
     def forward_extend(self, *args, **kwargs):
         return self.primary.forward_extend(*args, **kwargs)

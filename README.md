@@ -78,6 +78,43 @@ export DMLC_GROUP_SIZE=1
 python -m sglang.launch_server --model-path <Qwen3-moe model> --disable-overlap-schedule --disable-cuda-graph --port <port> --skip-server-warmup --watchdog-timeout 3600 --afd-perspective ffn --afd-mirco-batch 3 --attention-backend torch_native --max-total-tokens 2048 --max-running-requests 1
 ```
 
+### Run with TP=2
+
+Example:
+
+Attn
+```bash
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export AFD_SCHED_HOST=<ffn_ip>
+
+# RDMA NIC such as "bond0", this will enable StepMesh
+export DMLC_INTERFACE=<nic_name>
+# StepMesh root ip, should be same with attn and ffn
+export DMLC_PS_ROOT_URI=<root_ip>
+# Node number of ffn
+export DMLC_NUM_SERVER=1
+# Node number of attn
+export DMLC_NUM_WORKER=1
+# GPU number
+export DMLC_GROUP_SIZE=2
+
+python -m sglang.launch_server --model-path <Qwen3-moe model> --disable-overlap-schedule --disable-cuda-graph --afd-perspective attn --afd-mirco-batch 3 --tp 2
+```
+
+FFN
+```bash
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+export AFD_SCHED_HOST=<ffn_ip>
+
+export DMLC_INTERFACE=<nic_name>
+export DMLC_PS_ROOT_URI=<root_ip>
+export DMLC_NUM_SERVER=1
+export DMLC_NUM_WORKER=1
+export DMLC_GROUP_SIZE=2
+
+python -m sglang.launch_server --model-path <Qwen3-moe model> --disable-overlap-schedule --disable-cuda-graph --port <port> --skip-server-warmup --watchdog-timeout 3600 --afd-perspective ffn --afd-mirco-batch 3 --attention-backend torch_native --max-total-tokens 2048 --max-running-requests 1 --tp 2
+```
+
 ---
 
 <div align="center" id="sglangtop">

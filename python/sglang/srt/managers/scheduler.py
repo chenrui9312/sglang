@@ -31,6 +31,7 @@ import psutil
 import setproctitle
 import torch
 import zmq
+import torch.distributed as dist
 from torch.distributed import barrier
 
 from sglang.global_config import global_config
@@ -528,19 +529,17 @@ class Scheduler(
             configure_gc_logger()
 
         self.send_to_ffn, self.recv_from_attn = None, None
-        if self.pp_rank == 0 and self.attn_tp_rank == 0:
-            # AFD-NOTE: require better init
-            host = os.getenv("AFD_SCHED_HOST", "127.0.0.1")
-            port = get_int_env_var("AFD_SCHED_PORT", 65300)
-            afd_ipc_name = f"tcp://{host}:{port}"
-            if afd_is_attn():
-                self.send_to_ffn = get_zmq_socket(
-                    context, zmq.PUSH, afd_ipc_name, False
-                )
-            elif afd_is_ffn():
-                self.recv_from_attn = get_zmq_socket(
-                    context, zmq.PULL, afd_ipc_name, True
-                )
+        host = os.getenv("AFD_SCHED_HOST", "127.0.0.1")
+        port = get_int_env_var("AFD_SCHED_PORT", 65300)
+        afd_ipc_name = f"tcp://{host}:{port + dist.get_rank()}"
+        if afd_is_attn():
+            self.send_to_ffn = get_zmq_socket(
+                context, zmq.PUSH, afd_ipc_name, False
+            )
+        elif afd_is_ffn():
+            self.recv_from_attn = get_zmq_socket(
+                context, zmq.PULL, afd_ipc_name, True
+            )
 
         # Init request dispatcher
         self._request_dispatcher = TypeBasedDispatcher(
@@ -899,7 +898,6 @@ class Scheduler(
         logger.info("event_loop_afd: role={} m={}".format(get_afd_perspective(), get_afd_mirco_batch()))
 
         def _event_loop_attn():
-            saved_batch = None
             while True:
                 # AFD-NOTE: skip warmup batch of ffn, as it will be done by attn warmup
                 recv_reqs = self.recv_requests()
@@ -911,19 +909,17 @@ class Scheduler(
                 if batch:
                     prepare_overlap(batch)
 
-                    if afd_is_attn() and self.pp_rank == 0 and self.attn_tp_rank == 0:
-                        afd_batch = ScheduleBatch(
-                            reqs=[] if saved_batch else batch.reqs,
-                            forward_mode=batch.forward_mode,
-                            seq_lens=batch.seq_lens.cpu(),
-                            extend_lens=batch.extend_lens,
-                            prefix_lens=batch.prefix_lens,
-                            tbo_split_seq_index=batch.tbo_split_seq_index,
-                            input_ids=batch.input_ids.cpu(),
-                            extend_num_tokens=batch.extend_num_tokens,
-                        )
-                        self.send_to_ffn.send_pyobj(afd_batch)
-                        saved_batch = saved_batch if saved_batch else batch
+                    afd_batch = ScheduleBatch(
+                        reqs=[],
+                        forward_mode=batch.forward_mode,
+                        seq_lens=batch.seq_lens.cpu(),
+                        extend_lens=batch.extend_lens,
+                        prefix_lens=batch.prefix_lens,
+                        tbo_split_seq_index=batch.tbo_split_seq_index,
+                        input_ids=batch.input_ids.cpu(),
+                        extend_num_tokens=batch.extend_num_tokens,
+                    )
+                    self.send_to_ffn.send_pyobj(afd_batch)
 
                     result = self.run_batch(batch)
                     self.process_batch_result(batch, result)
@@ -934,17 +930,12 @@ class Scheduler(
                 self.last_batch = batch
         
         def _event_loop_ffn():
-            saved_batch = None
             while True:
                 try:
                     batch: ScheduleBatch = self.recv_from_attn.recv_pyobj(zmq.NOBLOCK)
                 except zmq.ZMQError:
                     continue
 
-                if saved_batch:
-                    batch.reqs = [saved_batch.reqs[0]] * len(batch.extend_lens)
-                else:
-                    saved_batch = batch
                 self.run_batch(batch)
 
         if afd_is_attn():

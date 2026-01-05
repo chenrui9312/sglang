@@ -171,7 +171,7 @@ from sglang.srt.utils import (
 )
 from sglang.utils import TypeBasedDispatcher, get_exception_traceback
 
-from sglang.srt.layers.afd import get_afd_mirco_batch, afd_is_attn, afd_is_ffn, get_afd_perspective
+from sglang.srt.layers.afd import get_afd_mirco_batch, afd_is_attn, afd_is_ffn, get_afd_perspective, get_tensor_communicator
 
 logger = logging.getLogger(__name__)
 
@@ -540,6 +540,7 @@ class Scheduler(
             self.recv_from_attn = get_zmq_socket(
                 context, zmq.PULL, afd_ipc_name, True
             )
+        get_tensor_communicator()
 
         # Init request dispatcher
         self._request_dispatcher = TypeBasedDispatcher(

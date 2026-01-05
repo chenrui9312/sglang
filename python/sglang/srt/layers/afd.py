@@ -43,6 +43,10 @@ from sglang.srt.layers.communicator import (
     CommunicateSummableTensorPairFn,
     ScatterMode,
 )
+from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
+from sglang.srt.utils import BumpAllocator
+
 
 class AFDForwardStage(Enum):
     AFD_FORWARD_STAGE_A = auto()
@@ -535,6 +539,100 @@ def model_forward_afd(
         torch.cat(all_residual, dim=0) if afd_is_attn() else None,
     )
 
+
+def deepseek_v2_forward_afd(
+    layers,
+    positions: torch.Tensor,
+    forward_batch: ForwardBatch,
+    hidden_states: torch.Tensor,
+    residual: Optional[torch.Tensor],
+    input_data_scatter_mode: ScatterMode,
+    zero_allocator: Optional[BumpAllocator] = None,
+):
+    num_layers = len(layers)
+    m_stage = get_afd_mirco_batch()
+
+    input_arrs = model_forward_afd_split_inputs(
+        layers=layers,
+        hidden_states=hidden_states,
+        residual=residual,
+        positions=positions,
+        forward_batch=forward_batch,
+        input_data_scatter_mode=input_data_scatter_mode,
+    )
+
+    stage_outputs: Dict[AFDForwardStage, deque[dict[Any, Any]]] = {
+        AFDForwardStage.AFD_FORWARD_STAGE_A: deque(),
+        AFDForwardStage.AFD_FORWARD_STAGE_F: deque(),
+    }
+
+    stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_F].extend(input_arrs)
+
+    def forward_A(layer_id: int, mirco_batch_idx: int):
+        inputs_args = stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_F].popleft()
+        hidden_states, residual = layers[layer_id].forward_afd_A(
+            input_arrs[mirco_batch_idx]["positions"],
+            inputs_args["hidden_states"],
+            input_arrs[mirco_batch_idx]["forward_batch"],
+            inputs_args["residual"],
+            zero_allocator,
+        )
+        stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_A].append(
+            dict(
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        )
+
+    def forward_F(layer_id: int, mirco_batch_idx: int):
+        inputs_args = stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_A].popleft()
+        hidden_states, residual = layers[layer_id].forward_afd_F(
+            inputs_args["hidden_states"],
+            input_arrs[mirco_batch_idx]["forward_batch"],
+            inputs_args["residual"],
+            zero_allocator,
+        )
+        stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_F].append(
+            dict(
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        )
+
+    stage_executors = {
+        AFDForwardStage.AFD_FORWARD_STAGE_A: forward_A,
+        AFDForwardStage.AFD_FORWARD_STAGE_F: forward_F,
+    }
+
+    pipeline_stages = (
+        AFDStageScheduleGenerator.attn_stage(num_layers, m_stage)
+        if afd_is_attn()
+        else AFDStageScheduleGenerator.ffn_stage(num_layers, m_stage)
+    )
+
+    for stage in pipeline_stages:
+        type, *args = stage
+        stage_executors.get(type)(*args)
+
+    try:
+        results = [
+            stage_outputs[AFDForwardStage.AFD_FORWARD_STAGE_F].popleft()
+            for _ in range(m_stage)
+        ]
+    except IndexError:
+        raise ValueError(
+            "model_forward_afd: impossible path, a potential implementation bug?"
+        )
+
+    all_hidden_states, all_residual = zip(
+        *((res["hidden_states"], res["residual"]) for res in results)
+    )
+
+    return (
+        torch.cat(all_hidden_states, dim=0),
+        torch.cat(all_residual, dim=0) if afd_is_attn() else None,
+    )
+
 class AFDCommunicator(LayerCommunicator):
     def __init__(self, layer_communicator: LayerCommunicator, perspective: AFDPerspective, layer_id: int, is_last_layer: int):
         super().__init__(
@@ -547,6 +645,10 @@ class AFDCommunicator(LayerCommunicator):
         self.perspective = perspective
         self.layer_communicator = layer_communicator
         self.layer_id = layer_id
+        # init attr from layer_communicator
+        for attr in dir(layer_communicator):
+            if not attr.startswith("__") and not attr in dir(self):
+                setattr(self, attr, getattr(layer_communicator, attr))
         self.empty_tensor = torch.empty(0)
 
     def prepare_attn(
@@ -554,12 +656,15 @@ class AFDCommunicator(LayerCommunicator):
         hidden_states: torch.Tensor,
         residual: torch.Tensor,
         forward_batch: ForwardBatch,
+        qaunt_format: str = "",
     ):
         # just pass through
         if afd_is_ffn():
             return hidden_states, residual
 
-        return self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
+        return self.layer_communicator.prepare_attn(
+            hidden_states, residual, forward_batch, qaunt_format
+        )
 
     def prepare_mlp(
         self,
@@ -604,10 +709,18 @@ class AFDProxyAttention(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        forward_batch: ForwardBatch) -> torch.Tensor:
+        forward_batch: ForwardBatch,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
         return hidden_states
 
 class AFDProxyMLP(nn.Module):
-    def forward(self, hidden_states: torch.Tensor,
-                forward_batch: Optional[ForwardBatch] = None, *args, **kwargs) -> torch.Tensor:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        forward_batch: Optional[ForwardBatch] = None,
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
         return hidden_states

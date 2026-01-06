@@ -46,10 +46,13 @@ from sglang.srt.layers.afd import (
     AFDCommunicator,
     AFDProxyAttention,
     AFDProxyMLP,
+    afd_is_attn,
+    afd_is_ffn,
     deepseek_v2_forward_afd,
     get_afd_perspective,
 )
 from sglang.srt.layers.afd_type import AFDPerspective
+
 from sglang.srt.layers.amx_utils import PackWeightMethod
 from sglang.srt.layers.communicator import (
     LayerCommunicator,
@@ -2029,6 +2032,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 layer_communicator=self.layer_communicator,
                 perspective=afd_perspective,
                 layer_id=layer_id,
+                is_last_layer=(self.layer_id == self.config.num_hidden_layers - 1),
             )
 
     def _is_layer_sparse(self, layer_id: int, is_nextn: bool) -> bool:
@@ -2074,12 +2078,13 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states, residual, forward_batch
         )
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            forward_batch=forward_batch,
-            zero_allocator=zero_allocator,
-        )
+        if hidden_states.shape[0] != 0:
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                forward_batch=forward_batch,
+                zero_allocator=zero_allocator,
+            )
 
         hidden_states, residual = self.layer_communicator.prepare_mlp(
             hidden_states, residual, forward_batch
@@ -2153,7 +2158,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             self.layer_communicator.should_fuse_mlp_allreduce_with_next_layer(
                 forward_batch
             )
-        )
+        ) if not afd_is_ffn() else False
 
         # For DP with padding, reduce scatter can be used instead of all-reduce.
         use_reduce_scatter = self.layer_communicator.should_use_reduce_scatter(
@@ -2378,6 +2383,8 @@ class DeepseekV2Model(nn.Module):
         )
 
         if self.pp_group.is_first_rank:
+            if afd_is_ffn():
+                input_embeds = torch.empty(0)
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)
             else:
@@ -2444,7 +2451,7 @@ class DeepseekV2Model(nn.Module):
                 }
             )
         else:
-            if not forward_batch.forward_mode.is_idle():
+            if not forward_batch.forward_mode.is_idle() and hidden_states.shape[0] != 0:
                 if residual is None:
                     hidden_states = self.norm(hidden_states)
                 else:
@@ -2552,6 +2559,8 @@ class DeepseekV2ForCausalLM(nn.Module):
         hidden_states = self.model(
             input_ids, positions, forward_batch, input_embeds, pp_proxy_tensors
         )
+        if hidden_states.shape[0] == 0:
+            return hidden_states
 
         if self.pp_group.is_last_rank:
             return self.logits_processor(
